@@ -1,0 +1,15 @@
+# Core LangGraph / LangChain
+langgraph>=0.2.0
+langchain>=0.2.0
+langchain-core>=0.2.0
+
+# FastAPI webhook server
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+
+# Async HTTP (used by MCP tools and Databricks REST API calls)
+httpx>=0.27.0
+
+# Databricks SDK (for Jobs API, Unity Catalog, and SQL Warehouse integration)
+databricks-sdk>=0.27.0
