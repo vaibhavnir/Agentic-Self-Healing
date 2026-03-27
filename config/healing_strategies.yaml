@@ -1,0 +1,65 @@
+strategies:
+  - name: "retry"
+    applicable_errors:
+      - "timeout"
+      - "connection_refused"
+      - "transient_error"
+    parameters:
+      max_retries: 3
+      backoff_multiplier: 2
+      initial_delay_ms: 1000
+
+  - name: "circuit_breaker"
+    applicable_errors:
+      - "service_unavailable"
+      - "rate_limit_exceeded"
+    parameters:
+      failure_threshold: 5
+      recovery_timeout_s: 300
+      half_open_max_calls: 3
+
+  - name: "rollback"
+    applicable_errors:
+      - "data_corruption"
+      - "schema_mismatch"
+      - "write_failure"
+    parameters:
+      keep_snapshots: 5
+      checkpoint_interval_s: 60
+
+  - name: "data_validation"
+    applicable_errors:
+      - "data_quality_issue"
+      - "null_values_exceeded"
+      - "type_mismatch"
+    parameters:
+      null_threshold_pct: 10
+      duplicate_threshold_pct: 5
+      schema_strict: true
+
+  - name: "resource_scaling"
+    applicable_errors:
+      - "memory_exceeded"
+      - "cpu_throttled"
+      - "disk_full"
+    parameters:
+      scale_factor: 2
+      max_scale_attempts: 3
+
+  - name: "dead_letter_queue"
+    applicable_errors:
+      - "unrecoverable_error"
+      - "max_retries_exceeded"
+    parameters:
+      dlq_topic: "etl.dead_letter"
+      alert_on_enqueue: true
+
+escalation:
+  confidence_threshold: 0.3
+  alert_channel: "ops_team"
+  pagerduty_enabled: false
+
+feedback:
+  persist_outcomes: true
+  outcomes_file: "data/healing_outcomes.json"
+  min_samples_for_confidence: 5
