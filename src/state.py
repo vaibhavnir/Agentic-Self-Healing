@@ -5,7 +5,7 @@ All nodes read from and write to this TypedDict.
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 
 class HealingState(TypedDict):
@@ -43,3 +43,7 @@ class HealingState(TypedDict):
 
     # Reasoning trace for auditability
     reasoning_trace: list[str]
+
+    # Databricks job integration (optional – populated when error originates from a Databricks job)
+    databricks_job_id: NotRequired[str]
+    databricks_run_id: NotRequired[str]

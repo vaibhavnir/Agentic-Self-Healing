@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -101,6 +102,7 @@ class CircuitBreakerStrategy(RecoveryStrategy):
     # Shared state across instances (class-level)
     _failure_counts: dict[str, int] = {}
     _open_since: dict[str, float] = {}
+    _lock: threading.Lock = threading.Lock()  # guards class-level dicts
 
     def __init__(
         self,
@@ -120,42 +122,43 @@ class CircuitBreakerStrategy(RecoveryStrategy):
         service = context.get("error_signal", {}).get("source", "unknown_service")
         now = time.time()
 
-        failures = self._failure_counts.get(service, 0) + 1
-        self._failure_counts[service] = failures
+        with CircuitBreakerStrategy._lock:
+            failures = self._failure_counts.get(service, 0) + 1
+            self._failure_counts[service] = failures
 
-        if failures >= self.failure_threshold:
-            open_since = self._open_since.get(service, now)
-            self._open_since[service] = open_since
-            elapsed = now - open_since
+            if failures >= self.failure_threshold:
+                open_since = self._open_since.get(service, now)
+                self._open_since[service] = open_since
+                elapsed = now - open_since
 
-            if elapsed >= self.recovery_timeout_s:
-                # Half-open: allow probe
-                self._failure_counts[service] = 0
-                del self._open_since[service]
+                if elapsed >= self.recovery_timeout_s:
+                    # Half-open: allow probe
+                    self._failure_counts[service] = 0
+                    del self._open_since[service]
+                    return {
+                        "success": True,
+                        "message": "Circuit half-opened – probe request allowed",
+                        "metadata": {"service": service, "elapsed_s": elapsed},
+                    }
+
                 return {
-                    "success": True,
-                    "message": "Circuit half-opened – probe request allowed",
-                    "metadata": {"service": service, "elapsed_s": elapsed},
+                    "success": False,
+                    "message": (
+                        f"Circuit OPEN for '{service}'. "
+                        f"Will attempt recovery in {self.recovery_timeout_s - elapsed:.0f}s"
+                    ),
+                    "metadata": {
+                        "service": service,
+                        "failures": failures,
+                        "open_since": open_since,
+                    },
                 }
 
             return {
-                "success": False,
-                "message": (
-                    f"Circuit OPEN for '{service}'. "
-                    f"Will attempt recovery in {self.recovery_timeout_s - elapsed:.0f}s"
-                ),
-                "metadata": {
-                    "service": service,
-                    "failures": failures,
-                    "open_since": open_since,
-                },
+                "success": True,
+                "message": f"Failure #{failures} recorded for '{service}' (threshold={self.failure_threshold})",
+                "metadata": {"service": service, "failures": failures},
             }
-
-        return {
-            "success": True,
-            "message": f"Failure #{failures} recorded for '{service}' (threshold={self.failure_threshold})",
-            "metadata": {"service": service, "failures": failures},
-        }
 
 
 class RollbackStrategy(RecoveryStrategy):
@@ -289,6 +292,80 @@ class DeadLetterQueueStrategy(RecoveryStrategy):
         }
 
 
+class DatabricksRetryStrategy(RecoveryStrategy):
+    """
+    Re-trigger the failed Databricks job run via the Jobs REST API.
+
+    Requires environment variables ``DATABRICKS_HOST`` and ``DATABRICKS_TOKEN``.
+    Falls back gracefully when credentials are absent (e.g., local testing).
+    """
+
+    name = "databricks_retry"
+
+    def __init__(self, max_retries: int = 2, poll_interval_s: int = 30) -> None:
+        self.max_retries = max_retries
+        self.poll_interval_s = poll_interval_s
+
+    def can_handle(self, error_context: dict[str, Any]) -> float:
+        databricks_errors = {"databricks_job_failed", "databricks_timeout"}
+        return 0.90 if error_context.get("type", "") in databricks_errors else 0.05
+
+    async def execute(self, context: dict[str, Any]) -> dict[str, Any]:
+        attempt = context.get("attempt_count", 0)
+        if attempt >= self.max_retries:
+            return {
+                "success": False,
+                "message": f"Max Databricks retries ({self.max_retries}) exceeded",
+                "metadata": {"attempt": attempt},
+            }
+
+        # Import here to keep the dependency optional
+        try:
+            from .databricks_client import DatabricksJobsClient  # noqa: PLC0415
+        except ImportError:
+            return {
+                "success": False,
+                "message": "DatabricksJobsClient not available",
+                "metadata": {},
+            }
+
+        client = DatabricksJobsClient.from_env()
+        if client is None:
+            return {
+                "success": False,
+                "message": (
+                    "Databricks credentials not configured "
+                    "(set DATABRICKS_HOST and DATABRICKS_TOKEN)"
+                ),
+                "metadata": {},
+            }
+
+        signal = context.get("error_signal", {})
+        job_id = signal.get("databricks_job_id")
+        if not job_id:
+            return {
+                "success": False,
+                "message": "No 'databricks_job_id' in error signal",
+                "metadata": {},
+            }
+
+        notebook_params = signal.get("databricks_notebook_params", {})
+        try:
+            run_id = await client.trigger_run(job_id=job_id, notebook_params=notebook_params)
+            logger.info("DatabricksRetryStrategy: triggered run_id=%s for job_id=%s", run_id, job_id)
+            return {
+                "success": True,
+                "message": f"Databricks job {job_id} re-triggered (run_id={run_id})",
+                "metadata": {"job_id": job_id, "run_id": run_id},
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "message": f"Failed to trigger Databricks job {job_id}: {exc}",
+                "metadata": {"job_id": job_id},
+            }
+
+
 # ---------------------------------------------------------------------------
 # Strategy registry helper
 # ---------------------------------------------------------------------------
@@ -305,6 +382,7 @@ def build_strategy_registry(config: list[dict[str, Any]]) -> dict[str, RecoveryS
         "data_validation": DataValidationStrategy,
         "resource_scaling": ResourceScalingStrategy,
         "dead_letter_queue": DeadLetterQueueStrategy,
+        "databricks_retry": DatabricksRetryStrategy,
     }
 
     registry: dict[str, RecoveryStrategy] = {}

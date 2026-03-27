@@ -1,0 +1,26 @@
+{
+  "timeout::retry": {
+    "successes": 3,
+    "total": 3
+  },
+  "data_quality_issue::data_validation": {
+    "successes": 2,
+    "total": 2
+  },
+  "weird_unknown_error::retry": {
+    "successes": 1,
+    "total": 1
+  },
+  "schema_mismatch::rollback": {
+    "successes": 1,
+    "total": 1
+  },
+  "memory_exceeded::resource_scaling": {
+    "successes": 1,
+    "total": 1
+  },
+  "write_failure::rollback": {
+    "successes": 1,
+    "total": 1
+  }
+}

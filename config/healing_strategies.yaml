@@ -54,6 +54,14 @@ strategies:
       dlq_topic: "etl.dead_letter"
       alert_on_enqueue: true
 
+  - name: "databricks_retry"
+    applicable_errors:
+      - "databricks_job_failed"
+      - "databricks_timeout"
+    parameters:
+      max_retries: 2
+      poll_interval_s: 30
+
 escalation:
   confidence_threshold: 0.3
   alert_channel: "ops_team"

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,8 @@ class AdaptiveHealer:
 
         # { (error_type, action): {"successes": int, "total": int} }
         self._history: dict[tuple[str, str], dict[str, int]] = {}
+        # Protects _history and file I/O from concurrent access
+        self._lock = threading.Lock()
 
         if self.outcomes_file and self.outcomes_file.exists():
             self._load()
@@ -54,55 +57,60 @@ class AdaptiveHealer:
         If fewer than `min_samples` outcomes are recorded the default (0.5)
         is returned so the system doesn't over-fit on sparse data.
         """
-        key = (error_type, action)
-        record = self._history.get(key)
-        if record is None or record["total"] < self.min_samples:
-            return _DEFAULT_CONFIDENCE
+        with self._lock:
+            key = (error_type, action)
+            record = self._history.get(key)
+            if record is None or record["total"] < self.min_samples:
+                return _DEFAULT_CONFIDENCE
 
-        return record["successes"] / record["total"]
+            return record["successes"] / record["total"]
 
     def record_outcome(self, error_type: str, action: str, success: bool) -> None:
         """Store the outcome of a healing attempt and (optionally) persist it."""
-        key = (error_type, action)
-        if key not in self._history:
-            self._history[key] = {"successes": 0, "total": 0}
+        with self._lock:
+            key = (error_type, action)
+            if key not in self._history:
+                self._history[key] = {"successes": 0, "total": 0}
 
-        self._history[key]["total"] += 1
-        if success:
-            self._history[key]["successes"] += 1
+            self._history[key]["total"] += 1
+            if success:
+                self._history[key]["successes"] += 1
 
-        logger.debug(
-            "AdaptiveHealer: recorded %s for (%s, %s) → %s",
-            "SUCCESS" if success else "FAILURE",
-            error_type,
-            action,
-            self._history[key],
-        )
+            logger.debug(
+                "AdaptiveHealer: recorded %s for (%s, %s) → %s",
+                "SUCCESS" if success else "FAILURE",
+                error_type,
+                action,
+                self._history[key],
+            )
 
-        if self.outcomes_file:
-            self._persist()
+            if self.outcomes_file:
+                self._persist()
 
     def summary(self) -> list[dict[str, Any]]:
         """Return a human-readable summary of all tracked outcomes."""
-        rows = []
-        for (error_type, action), record in self._history.items():
-            total = record["total"]
-            successes = record["successes"]
-            rows.append(
-                {
-                    "error_type": error_type,
-                    "action": action,
-                    "successes": successes,
-                    "failures": total - successes,
-                    "total": total,
-                    "success_rate": round(successes / total, 3) if total else 0,
-                }
-            )
+        with self._lock:
+            rows = []
+            for (error_type, action), record in self._history.items():
+                total = record["total"]
+                successes = record["successes"]
+                rows.append(
+                    {
+                        "error_type": error_type,
+                        "action": action,
+                        "successes": successes,
+                        "failures": total - successes,
+                        "total": total,
+                        "success_rate": round(successes / total, 3) if total else 0,
+                    }
+                )
         return sorted(rows, key=lambda r: r["success_rate"], reverse=True)
 
     # ------------------------------------------------------------------
     # Persistence helpers
     # ------------------------------------------------------------------
+
+    # _persist and _load are always called while self._lock is already held.
 
     def _persist(self) -> None:
         assert self.outcomes_file is not None
